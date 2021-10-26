@@ -1,0 +1,197 @@
+# environment setup
+ss;
+. neuro-fs stable 6.0;
+
+FSLDIR=/neuro/users/[your network ID]/arch/Linux64/packages/fsl/6.0;
+. ${FSLDIR}/etc/fslconf/fsl.sh;
+PATH=${FSLDIR}/bin:${PATH};
+export FSLDIR PATH;
+
+
+# Brain mask
+/neuro/labs/grantlab/research/HyukJin_MRI/code/brain_mask2 --target-dir ./${file}/ ;
+python /neuro/labs/grantlab/research/HyukJin_MRI/code/brain_masking_auto_v02.py ./${file}/;
+
+# Non uniformity correction
+mkdir ./${file}/nuc/
+singularity exec docker://fnndsc/pl-ants_n4biasfieldcorrection:0.2.7.1 bfc ${file}/brain/ ${file}/nuc/;
+# docker run --rm -u $(id -u):$(id -g) --userns=host --cpuset-cpus 0-4 -v $PWD/${file}/brain:/incoming:ro -v $PWD/${file}/nuc:/outgoing:rw fnndsc/pl-ants_n4biasfieldcorrection:0.2.7.1 bfc /incoming /outgoing;
+
+# Quality assessment
+singularity exec --nv docker://fnndsc/pl-fetal-brain-assessment:1.3.0 fetal_brain_assessment ${file}/nuc/ ${file}/;
+
+# Brain age estimation
+cp -r ./${file}/Best_Images_crop/ ./${file}/estimated_brain_age/;
+python /neuro/labs/grantlab/research/HyukJin_MRI/code/make_verify_single.py ./${file}/estimated_brain_age/
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/resample_inplane.py "./${file}/estimated_brain_age/";
+/neuro/labs/grantlab/research/HyukJin_MRI/code/fetal_brainage_predic -input "./${file}/estimated_brain_age/*_brain_crop_dn_rsl.nii.gz" -output ./${file}/estimated_brain_age/brain_age_rsl.txt -detail_output ./${file}/estimated_brain_age/slice_age_list_rsl.txt;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/mode_brain_age.py ./${file}/estimated_brain_age/slice_age_list_rsl.txt;
+
+# Reconstruction - should be performed in rc-drno
+mkdir ${file}/recon/;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/reconstruction_auto.py ${file} 0.4 1;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/reconstruction_auto.py ${file} 0.4 2;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/reconstruction_auto.py ${file} 0.4 3;
+
+
+
+
+
+
+# Alignment
+mkdir ${file}/recon_1/recon/;
+cp ${file}/recon_1/recon_Best.nii ${file}/recon_1/recon/recon.nii;
+mkdir ${file}/recon_2/recon/;
+cp ${file}/recon_2/recon_Second.nii ${file}/recon_2/recon/recon.nii;
+mkdir ${file}/recon_3/recon/;
+cp ${file}/recon_3/recon_Third.nii ${file}/recon_3/recon/recon.nii;
+
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/alignment_updated_HJ.py ${file}/recon_1/;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/alignment_updated_HJ.py ${file}/recon_2/;
+python3 /neuro/labs/grantlab/research/HyukJin_MRI/code/alignment_updated_HJ.py ${file}/recon_3/;
+
+~/arch/Linux64/packages/ANTs/current/bin/N4BiasFieldCorrection -d 3 -o ${file}/recon_1/segmentation/recon_to31_nuc.nii -i ${file}/recon_1/segmentation/recon_to31.nii;
+~/arch/Linux64/packages/ANTs/current/bin/N4BiasFieldCorrection -d 3 -o ${file}/recon_2/segmentation/recon_to31_nuc.nii -i ${file}/recon_2/segmentation/recon_to31.nii;
+~/arch/Linux64/packages/ANTs/current/bin/N4BiasFieldCorrection -d 3 -o ${file}/recon_3/segmentation/recon_to31_nuc.nii -i ${file}/recon_3/segmentation/recon_to31.nii;
+
+	#Alignment correction
+#	check the images in alignment/Temp-Recon-7dof-*.nii and find a well-aligned template
+#	set the variable named template (i.e. template=27)
+convert_xfm -omat InvAligned-${template}.xfm -inverse Temp-Recon-7dof-${template}.xfm;
+convert_xfm -omat recon_to31.xfm -concat
+/neuro/labs/grantlab/research/HyukJin_MRI/templates_for_alginment/template-${template}/template-${template}to31.xfm InvAligned-${template}.xfm;
+flirt -in recon.nii -ref /neuro/labs/grantlab/research/HyukJin_MRI/templates_for_alginment/template-31/template-31.nii -out recon_to31.nii.gz -init recon_to31.xfm -applyxfm;
+rm recon_to31.nii;
+gunzip recon_to31.nii.gz;
+cp recon_to31.nii ../segmentation;
+cp recon_to31.xfm ../segmentation;
+
+# Segmentation
+/neuro/labs/grantlab/research/HyukJin_MRI/code/fetal_cp_seg2 -input ${file}/recon_1/segmentation/recon_to31_nuc.nii -output ${file}/recon_1/segmentation/;
+/neuro/labs/grantlab/research/HyukJin_MRI/code/fetal_cp_seg2 -input ${file}/recon_2/segmentation/recon_to31_nuc.nii -output ${file}/recon_2/segmentation/;
+/neuro/labs/grantlab/research/HyukJin_MRI/code/fetal_cp_seg2 -input ${file}/recon_3/segmentation/recon_to31_nuc.nii -output ${file}/recon_3/segmentation/;
+
+#Surface extraction
+source /neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/init.sh
+
+mkdir ${file}/temp/ ${file}/surfaces/;
+# recon is where the segmentation_to31_final.nii is located
+cp -r ${file}/recon_#/* ${file}/
+
+nii2mnc ${file}/segmentation/segmentation_to31_final.nii ${file}/temp/segmentation_to31_final.mnc;
+
+mincmath -clobber -eq -const 161  ${file}/temp/segmentation_to31_final.mnc ${file}/temp/inner_left.mnc;
+mincmath -clobber -eq -const 160  ${file}/temp/segmentation_to31_final.mnc ${file}/temp/inner_right.mnc;
+
+mincblur -clobber -fwhm 3 ${file}/temp/inner_left.mnc ${file}/temp/inner_left_fwhm;
+mincblur -clobber -fwhm 3 ${file}/temp/inner_right.mnc ${file}/temp/inner_right_fwhm;
+
+/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/extract_white_surface_fetus_new.pl ${file}/temp/inner_left_fwhm_blur.mnc ${file}/temp/lh.white.obj 0.5;
+/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/extract_white_surface_fetus_new.pl ${file}/temp/inner_right_fwhm_blur.mnc ${file}/temp/rh.white.obj 0.5;
+
+/neuro/labs/grantlab/research/HyukJin_MRI/code/mesh_to_std_format.pl -left ${file}/temp/lh.white_20480.obj ${file}/surfaces/lh.smoothwm.to31.obj;
+/neuro/labs/grantlab/research/HyukJin_MRI/code/mesh_to_std_format.pl -right ${file}/temp/rh.white_20480.obj ${file}/surfaces/rh.smoothwm.to31.obj;
+
+	#map interpolation - pending
+	/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/surf_surf_interpolate
+
+
+#Surface registration
+bestsurfreg.pl -clobber -min_control_mesh 80 -max_control_mesh 81920 -blur_coef 1.25 -neighbourhood_radius 2.8 -maximum_blur 1.9 /neuro/labs/grantlab/research/HyukJin_MRI/Fetal_template/template-28/lh.smoothwm.mni.obj ./${file}/surfaces/lh.smoothwm.to31.obj  ./${file}/surfaces/lh.smoothwm.toT28.sm;
+bestsurfreg.pl -clobber -min_control_mesh 80 -max_control_mesh 81920 -blur_coef 1.25 -neighbourhood_radius 2.8 -maximum_blur 1.9 /neuro/labs/grantlab/research/HyukJin_MRI/Fetal_template/template-28/rh.smoothwm.mni.obj ./${file}/surfaces/rh.smoothwm.to31.obj  ./${file}/surfaces/rh.smoothwm.toT28.sm;
+
+sphere_resample_obj ./${file}/surfaces/lh.smoothwm.to31.obj ./${file}/surfaces/lh.smoothwm.toT28.sm ./${file}/surfaces/lh.smoothwm.to31.rsl.obj;
+sphere_resample_obj ./${file}/surfaces/rh.smoothwm.to31.obj ./${file}/surfaces/rh.smoothwm.toT28.sm ./${file}/surfaces/rh.smoothwm.to31.rsl.obj;
+
+#surface-resample [option] target.obj source.obj source_map registrationmap.sm map_resampledtotarget
+
+# Surface/map resample to MNI standard mesh
+/neuro/labs/grantlab/research/HyukJin_MRI/code/mesh_to_std_format.pl
+
+/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/surf_surf_interpolate
+
+# resize surfaces
+convert_xfm -omat ${file}/segmentation/recon_to31_inv.xfm -inverse ${file}/segmentation/recon_to31.xfm;
+scaling=`avscale ${file}/segmentation/recon_to31_inv.xfm | grep Scale`;
+param2xfm -scales ${scaling:16} ${file}/surfaces/recon_native.xfm;
+
+transform_objects ${file}/surfaces/lh.smoothwm.to31.obj ${file}/surfaces/recon_native.xfm ${file}/surfaces/lh.smoothwm.native.obj;
+transform_objects ${file}/surfaces/rh.smoothwm.to31.obj ${file}/surfaces/recon_native.xfm ${file}/surfaces/rh.smoothwm.native.obj;
+
+transform_objects ${file}/surfaces/lh.smoothwm.to31.rsl.obj ${file}/surfaces/recon_native.xfm ${file}/surfaces/lh.smoothwm.native.rsl.obj;
+transform_objects ${file}/surfaces/rh.smoothwm.to31.rsl.obj ${file}/surfaces/recon_native.xfm ${file}/surfaces/rh.smoothwm.native.rsl.obj;
+
+# Freesurfer format
+/neuro/labs/grantlab/research/HyukJin_MRI/code/obj2asc ${file}/surfaces/lh.smoothwm.native.obj ${file}/surfaces/lh.smoothwm.native.asc;
+/neuro/labs/grantlab/research/HyukJin_MRI/code/obj2asc ${file}/surfaces/rh.smoothwm.native.obj ${file}/surfaces/rh.smoothwm.native.asc;
+
+# surface measures
+~/Codes/ADT_white_vFetal_final.py ${file}/surfaces
+
+transform_objects ${file}/surfaces/lh.smoothwm.native.obj ~/Data/Labeling/templates/xfm/template-31toMNI.xfm ${file}/surfaces/lh.smoothwm.mni.obj;
+transform_objects ${file}/surfaces/rh.smoothwm.native.obj ~/Data/Labeling/templates/xfm/template-31toMNI.xfm ${file}/surfaces/rh.smoothwm.mni.obj;
+
+depth_potential -smooth 5 ${file}/surfaces/lh.smoothwm.native.depth ${file}/surfaces/lh.smoothwm.mni.obj  ${file}/surfaces/lh.smoothwm.native.depth.s5;
+depth_potential -smooth 5 ${file}/surfaces/rh.smoothwm.native.depth ${file}/surfaces/rh.smoothwm.mni.obj  ${file}/surfaces/rh.smoothwm.native.depth.s5;
+
+depth_potential -area_voronoi ${file}/surfaces/lh.smoothwm.native.obj ${file}/surfaces/lh.smoothwm.native.area;
+depth_potential -area_voronoi ${file}/surfaces/rh.smoothwm.native.obj ${file}/surfaces/rh.smoothwm.native.area;
+
+depth_potential -mean_curvature ${file}/surfaces/lh.smoothwm.mni.obj  ${file}/surfaces/lh.smoothwm.mni.mc;
+depth_potential -mean_curvature ${file}/surfaces/rh.smoothwm.mni.obj  ${file}/surfaces/rh.smoothwm.mni.mc;
+
+depth_potential -smooth 5 ${file}/surfaces/lh.smoothwm.mni.mc ${file}/surfaces/lh.smoothwm.mni.obj ${file}/surfaces/lh.smoothwm.mni.mc.s5;
+depth_potential -smooth 5 ${file}/surfaces/rh.smoothwm.mni.mc ${file}/surfaces/rh.smoothwm.mni.obj${file}/surfaces/rh.smoothwm.mni.mc.s5;
+
+
+echo `~/Codes/vertex_mean_sum.py -sum ${file}/surfaces/lh.smoothwm.native.area` `~/Codes/vertex_mean_sum.py -sum ${file}/surfaces/rh.smoothwm.native.area` `~/Codes/vertex_mean_sum.py -mean ${file}/surfaces/lh.smoothwm.native.depth.s5` `~/Codes/vertex_mean_sum.py -mean ${file}/surfaces/rh.smoothwm.native.depth.s5` `~/Codes/vertex_mean_sum.py -ab_mean ${file}/surfaces/lh.smoothwm.mni.mc.s5` `~/Codes/vertex_mean_sum.py -ab_mean ${file}/surfaces/rh.smoothwm.mni.mc.s5`;
+
+
+#Gyrification Index
+mri_distance_transform ./${file}/segmentation/segmentation_to31_final.nii 160 10 1 ./${file}/temp/lh.dist10.nii
+mri_threshold ./${file}/temp/lh.dist10.nii 10 ./${file}/temp/lh.dist10.mask.nii
+mri_distance_transform ./${file}/temp/lh.dist10.mask.nii 0 10 2 ./${file}/temp/lh.dist10.mask.dist10.nii
+fslmaths ./${file}/temp/lh.dist10.mask.dist10.nii -mul -1 ./${file}/temp/lh.dist10.mask.dist10.inv.nii
+gunzip ./${file}/temp/lh.dist10.mask.dist10.inv.nii.gz
+mri_threshold ./${file}/temp/lh.dist10.mask.dist10.inv.nii 10 ./${file}/temp/lh.closing.nii
+
+mri_distance_transform ./${file}/segmentation/segmentation_to31_final.nii 161 10 1 ./${file}/temp/rh.dist10.nii
+mri_threshold ./${file}/temp/rh.dist10.nii 10 ./${file}/temp/rh.dist10.mask.nii
+mri_distance_transform ./${file}/temp/rh.dist10.mask.nii 0 10 2 ./${file}/temp/rh.dist10.mask.dist10.nii
+fslmaths ./${file}/temp/rh.dist10.mask.dist10.nii -mul -1 ./${file}/temp/rh.dist10.mask.dist10.inv.nii
+gunzip ./${file}/temp/rh.dist10.mask.dist10.inv.nii.gz
+mri_threshold ./${file}/temp/rh.dist10.mask.dist10.inv.nii 10 ./${file}/temp/rh.closing.nii
+
+nii2mnc ./${file}/temp/lh.closing.nii ./${file}/temp/lh.closing.mnc;
+nii2mnc ./${file}/temp/rh.closing.nii ./${file}/temp/rh.closing.mnc;
+
+mincmath -clobber -gt -const 0 ./${file}/temp/lh.closing.mnc ./${file}/temp/lh.closing_bin.mnc
+mincmath -clobber -gt -const 0 ./${file}/temp/rh.closing.mnc ./${file}/temp/rh.closing_bin.mnc
+
+mincblur -clobber -fwhm 3 ${file}/temp/lh.closing_bin.mnc ${file}/temp/lh.closing_fwhm;
+mincblur -clobber -fwhm 3 ${file}/temp/rh.closing_bin.mnc ${file}/temp/rh.closing_fwhm;
+
+/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/extract_white_surface_fetus_new.pl ${file}/temp/lh.closing_fwhm_blur.mnc ${file}/temp/lh.hull.obj 0.5;
+/neuro/labs/grantlab/research/HyukJin_MRI/CIVET/quarantines/Linux-x86_64/bin/extract_white_surface_fetus_new.pl ${file}/temp/rh.closing_fwhm_blur.mnc ${file}/temp/rh.hull.obj 0.5;
+
+/neuro/labs/grantlab/research/HyukJin_MRI/code/mesh_to_std_format.pl -left ${file}/temp/lh.hull_20480.obj ${file}/temp/lh.hull.to31.obj;
+/neuro/labs/grantlab/research/HyukJin_MRI/code/mesh_to_std_format.pl -right ${file}/temp/rh.hull_20480.obj ${file}/temp/rh.hull.to31.obj;
+
+
+measure_surface_area ./${file}/surfaces/lh.smoothwm.to31.obj > ./${file}/temp/GI_inf2.txt;
+measure_surface_area ./${file}/temp/lh.hull.to31.obj >> ./${file}/temp/GI_inf2.txt;
+measure_surface_area ./${file}/surfaces/rh.smoothwm.to31.obj >> ./${file}/temp/GI_inf2.txt;
+measure_surface_area ./${file}/temp/rh.hull.to31.obj >> ./${file}/temp/GI_inf2.txt;
+
+lh_surf=`cat ${file}/temp/GI_inf2.txt | cut -d':' -f2 | cut -d$'\n' -f1`
+lh_hull=`cat ${file}/temp/GI_inf2.txt | cut -d':' -f2 | cut -d$'\n' -f2`
+rh_surf=`cat ${file}/temp/GI_inf2.txt | cut -d':' -f2 | cut -d$'\n' -f3`
+rh_hull=`cat ${file}/temp/GI_inf2.txt | cut -d':' -f2 | cut -d$'\n' -f4`
+bh_surf=`echo $lh_surf + $rh_surf | bc -l`
+bh_hull=`echo $lh_hull + $rh_hull | bc -l`
+lh_GI=`echo $lh_surf/$lh_hull | bc -l`
+rh_GI=`echo $rh_surf/$rh_hull | bc -l`
+bh_GI=`echo $bh_surf / $bh_hull| bc -l`
+
+echo $lh_GI $rh_GI $bh_GI > ./${file}/surfaces/GI_info_final.txt;
+
